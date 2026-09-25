@@ -7,10 +7,10 @@ venv/
 .venv/
 
 # Large datasets
-dataset/
+
 
 # Generated outputs
-output/
+
 
 # Temporary files
 *.tmp
