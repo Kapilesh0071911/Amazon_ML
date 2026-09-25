@@ -24,7 +24,7 @@ TOP_K = 30
 # NORMALIZATION
 # ============================================================
 
-def normalize_name(value):
+def normalize_value(value):
 
     if pd.isna(value):
         return ""
@@ -40,32 +40,38 @@ def normalize_name(value):
 # MULTIPLE BLOCKING KEYS
 # ============================================================
 
-def get_block_keys(name):
+def get_block_keys(name, address):
 
-    name = normalize_name(name)
-
-    if not name:
-        return set()
+    name = normalize_value(name)
+    address = normalize_value(address)
 
     keys = set()
 
-    # First 3 characters
-    if len(name) >= 3:
-        keys.add(
-            "F3_" + name[:3]
-        )
+    # ----------------------------
+    # NAME BLOCKS
+    # ----------------------------
 
-    # First 4 characters
+    if len(name) >= 3:
+        keys.add("NF3_" + name[:3])
+
     if len(name) >= 4:
-        keys.add(
-            "F4_" + name[:4]
-        )
+        keys.add("NF4_" + name[:4])
 
-    # Last 3 characters
     if len(name) >= 3:
-        keys.add(
-            "L3_" + name[-3:]
-        )
+        keys.add("NL3_" + name[-3:])
+
+    # ----------------------------
+    # ADDRESS BLOCKS
+    # ----------------------------
+
+    if len(address) >= 3:
+        keys.add("AF3_" + address[:3])
+
+    if len(address) >= 4:
+        keys.add("AF4_" + address[:4])
+
+    if len(address) >= 3:
+        keys.add("AL3_" + address[-3:])
 
     return keys
 
@@ -85,6 +91,12 @@ s1 = pd.read_csv(
 
 s1["name_normalized"] = (
     s1["name_normalized"]
+    .fillna("")
+    .astype(str)
+)
+
+s1["address_normalized"] = (
+    s1["address_normalized"]
     .fillna("")
     .astype(str)
 )
@@ -140,7 +152,7 @@ print(
 
 
 # ============================================================
-# LOAD TRUE MATCHES
+# LOAD TRUE MATCHES FROM SOURCE 2
 # ============================================================
 
 print("\nLoading true matches...")
@@ -158,7 +170,8 @@ s2 = s2[
 ][
     [
         "entity_id",
-        "name_normalized"
+        "name_normalized",
+        "address_normalized"
     ]
 ]
 
@@ -167,6 +180,10 @@ print(
     len(s2)
 )
 
+
+# ============================================================
+# LOAD TRUE MATCHES FROM SOURCE 3
+# ============================================================
 
 s3 = pd.read_csv(
     S3_FILE,
@@ -181,7 +198,8 @@ s3 = s3[
 ][
     [
         "entity_id",
-        "name_normalized"
+        "name_normalized",
+        "address_normalized"
     ]
 ]
 
@@ -206,7 +224,8 @@ random_s2 = pd.read_csv(
 )[
     [
         "entity_id",
-        "name_normalized"
+        "name_normalized",
+        "address_normalized"
     ]
 ]
 
@@ -219,7 +238,8 @@ random_s3 = pd.read_csv(
 )[
     [
         "entity_id",
-        "name_normalized"
+        "name_normalized",
+        "address_normalized"
     ]
 ]
 
@@ -238,6 +258,10 @@ random_candidates = random_candidates[
 ]
 
 
+# ============================================================
+# FINAL TEST CANDIDATES
+# ============================================================
+
 candidate_sample = pd.concat(
     [
         s2,
@@ -249,7 +273,6 @@ candidate_sample = pd.concat(
     subset=["entity_id"]
 )
 
-
 print(
     "Total candidates:",
     len(candidate_sample)
@@ -260,7 +283,7 @@ print(
 # BUILD MULTI-BLOCK INDEX
 # ============================================================
 
-print("\nBuilding multi-block index...")
+print("\nBuilding name + address block index...")
 
 block_index = {}
 
@@ -269,9 +292,11 @@ for row in candidate_sample.itertuples(
 ):
 
     entity_id = row.entity_id
-    name = row.name_normalized
 
-    keys = get_block_keys(name)
+    keys = get_block_keys(
+        row.name_normalized,
+        row.address_normalized
+    )
 
     for key in keys:
 
@@ -282,7 +307,8 @@ for row in candidate_sample.itertuples(
         block_index[key].append(
             (
                 entity_id,
-                name
+                row.name_normalized,
+                row.address_normalized
             )
         )
 
@@ -305,7 +331,6 @@ for row in s1.itertuples(
 ):
 
     s1_id = row.entity_id
-    s1_name = row.name_normalized
 
     true_string = truth_lookup.get(
         s1_id,
@@ -321,31 +346,34 @@ for row in s1.itertuples(
 
 
     # --------------------------------------------------------
-    # Get candidates from ALL blocking keys
+    # Retrieve candidates using name + address blocks
     # --------------------------------------------------------
 
     candidates_dict = {}
 
     keys = get_block_keys(
-        s1_name
+        row.name_normalized,
+        row.address_normalized
     )
 
     for key in keys:
 
-        for entity_id, name in block_index.get(
+        for entity_id, name, address in block_index.get(
             key,
             []
         ):
 
             candidates_dict[
                 entity_id
-            ] = name
+            ] = (
+                name,
+                address
+            )
 
 
     candidates = list(
         candidates_dict.items()
     )
-
 
     if not candidates:
 
@@ -354,16 +382,16 @@ for row in s1.itertuples(
 
 
     # --------------------------------------------------------
-    # Fuzzy matching
+    # Fuzzy name matching
     # --------------------------------------------------------
 
     candidate_names = [
-        item[1]
+        item[1][0]
         for item in candidates
     ]
 
     matches = process.extract(
-        s1_name,
+        row.name_normalized,
         candidate_names,
         scorer=fuzz.ratio,
         limit=TOP_K
@@ -406,7 +434,7 @@ print(
 )
 
 print(
-    "MULTI-BLOCK RECALL"
+    "NAME + ADDRESS BLOCKING RECALL"
 )
 
 print(

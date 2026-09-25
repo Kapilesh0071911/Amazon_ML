@@ -1,9 +1,6 @@
 import os
 import re
 import pandas as pd
-import numpy as np
-
-from rapidfuzz import process, fuzz
 
 
 # ============================================================
@@ -33,36 +30,79 @@ OUTPUT_FILE = os.path.join(
     "candidate_pairs.tsv"
 )
 
-TOP_K = 30
+# Process Source 1 in chunks
+S1_CHUNK_SIZE = 10000
 
-S1_CHUNK_SIZE = 5000
-
-# First N characters used for blocking
-PREFIX_LENGTH = 3
-
-# Maximum number of candidates retained
-MAX_BLOCK_CANDIDATES = 500
+# Read S2/S3 in chunks
+CANDIDATE_CHUNK_SIZE = 100000
 
 
 # ============================================================
-# HELPER
+# NORMALIZATION
 # ============================================================
 
-def get_prefix(value):
+def normalize_value(value):
 
     if pd.isna(value):
         return ""
 
-    value = str(value)
-
-    # Keep only alphanumeric characters
-    value = re.sub(
+    return re.sub(
         r"[^a-z0-9]",
         "",
-        value.lower()
+        str(value).lower()
     )
 
-    return value[:PREFIX_LENGTH]
+
+# ============================================================
+# BLOCKING KEYS
+# ============================================================
+
+def get_block_keys(name, address):
+
+    name = normalize_value(name)
+    address = normalize_value(address)
+
+    keys = set()
+
+    # --------------------------------------------------------
+    # NAME BLOCKS
+    # --------------------------------------------------------
+
+    if len(name) >= 3:
+        keys.add(
+            "NF3_" + name[:3]
+        )
+
+    if len(name) >= 4:
+        keys.add(
+            "NF4_" + name[:4]
+        )
+
+    if len(name) >= 3:
+        keys.add(
+            "NL3_" + name[-3:]
+        )
+
+    # --------------------------------------------------------
+    # ADDRESS BLOCKS
+    # --------------------------------------------------------
+
+    if len(address) >= 3:
+        keys.add(
+            "AF3_" + address[:3]
+        )
+
+    if len(address) >= 4:
+        keys.add(
+            "AF4_" + address[:4]
+        )
+
+    if len(address) >= 3:
+        keys.add(
+            "AL3_" + address[-3:]
+        )
+
+    return keys
 
 
 # ============================================================
@@ -80,7 +120,7 @@ for file_path in [
     if not os.path.exists(file_path):
 
         raise FileNotFoundError(
-            f"File not found: {file_path}"
+            f"Missing input file: {file_path}"
         )
 
     print(
@@ -99,176 +139,135 @@ os.makedirs(
 
 
 # ============================================================
-# REMOVE OLD OUTPUT
+# BUILD BLOCK INDEX
 # ============================================================
 
-if os.path.exists(
-    OUTPUT_FILE
+print("\nBuilding block index...")
+
+
+block_index = {}
+
+
+def index_source(
+    file_path,
+    source_name
 ):
 
-    os.remove(
-        OUTPUT_FILE
-    )
+    total_rows = 0
+    chunk_number = 0
 
     print(
-        f"Removed old output: {OUTPUT_FILE}"
+        f"\nIndexing {source_name}..."
+    )
+
+    for chunk in pd.read_csv(
+        file_path,
+        sep="\t",
+        dtype=str,
+        usecols=[
+            "entity_id",
+            "name_normalized",
+            "address_normalized"
+        ],
+        chunksize=CANDIDATE_CHUNK_SIZE
+    ):
+
+        chunk_number += 1
+
+        chunk[
+            "name_normalized"
+        ] = (
+            chunk[
+                "name_normalized"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+        chunk[
+            "address_normalized"
+        ] = (
+            chunk[
+                "address_normalized"
+            ]
+            .fillna("")
+            .astype(str)
+        )
+
+
+        for row in chunk.itertuples(
+            index=False
+        ):
+
+            keys = get_block_keys(
+                row.name_normalized,
+                row.address_normalized
+            )
+
+            for key in keys:
+
+                if key not in block_index:
+
+                    block_index[key] = []
+
+                block_index[key].append(
+                    (
+                        row.entity_id,
+                        source_name
+                    )
+                )
+
+
+        total_rows += len(chunk)
+
+        print(
+            f"  {source_name} chunk "
+            f"{chunk_number} processed "
+            f"({len(chunk):,} rows)"
+        )
+
+
+    print(
+        f"{source_name} complete: "
+        f"{total_rows:,} rows"
     )
 
 
 # ============================================================
-# BUILD CANDIDATE INDEX
+# INDEX S2
 # ============================================================
 
-print("\nBuilding candidate index...")
-
-candidate_index = {}
-
-
-# ------------------------------------------------------------
-# Read S2
-# ------------------------------------------------------------
-
-print("\nIndexing Source 2...")
-
-s2_reader = pd.read_csv(
+index_source(
     S2_FILE,
-    sep="\t",
-    dtype=str,
-    usecols=[
-        "entity_id",
-        "name_normalized"
-    ],
-    chunksize=100_000
+    "S2"
 )
 
-s2_count = 0
 
-for chunk in s2_reader:
+# ============================================================
+# INDEX S3
+# ============================================================
 
-    chunk[
-        "name_normalized"
-    ] = (
-        chunk[
-            "name_normalized"
-        ]
-        .fillna("")
-        .astype(str)
-    )
-
-    for row in chunk.itertuples(
-        index=False
-    ):
-
-        entity_id = row.entity_id
-        name = row.name_normalized
-
-        prefix = get_prefix(
-            name
-        )
-
-        if not prefix:
-            continue
-
-        if prefix not in candidate_index:
-
-            candidate_index[
-                prefix
-            ] = []
-
-        candidate_index[
-            prefix
-        ].append(
-            (
-                entity_id,
-                name,
-                "S2"
-            )
-        )
-
-    s2_count += len(chunk)
-
-    print(
-        f"  Indexed S2: "
-        f"{s2_count:,}"
-    )
-
-
-# ------------------------------------------------------------
-# Read S3
-# ------------------------------------------------------------
-
-print("\nIndexing Source 3...")
-
-s3_reader = pd.read_csv(
+index_source(
     S3_FILE,
-    sep="\t",
-    dtype=str,
-    usecols=[
-        "entity_id",
-        "name_normalized"
-    ],
-    chunksize=100_000
+    "S3"
 )
-
-s3_count = 0
-
-for chunk in s3_reader:
-
-    chunk[
-        "name_normalized"
-    ] = (
-        chunk[
-            "name_normalized"
-        ]
-        .fillna("")
-        .astype(str)
-    )
-
-    for row in chunk.itertuples(
-        index=False
-    ):
-
-        entity_id = row.entity_id
-        name = row.name_normalized
-
-        prefix = get_prefix(
-            name
-        )
-
-        if not prefix:
-            continue
-
-        if prefix not in candidate_index:
-
-            candidate_index[
-                prefix
-            ] = []
-
-        candidate_index[
-            prefix
-        ].append(
-            (
-                entity_id,
-                name,
-                "S3"
-            )
-        )
-
-    s3_count += len(chunk)
-
-    print(
-        f"  Indexed S3: "
-        f"{s3_count:,}"
-    )
 
 
 print(
-    "\nCandidate index built."
+    "\n========================================"
 )
 
 print(
-    "Number of prefix buckets:",
-    len(candidate_index)
+    "BLOCK INDEX READY"
+)
+
+print(
+    "Total block keys:",
+    f"{len(block_index):,}"
+)
+
+print(
+    "========================================"
 )
 
 
@@ -280,228 +279,180 @@ print(
     "\nLoading Source 1..."
 )
 
-s1 = pd.read_csv(
-    S1_FILE,
-    sep="\t",
-    dtype=str
-)
 
-s1[
-    "name_normalized"
-] = (
-    s1[
-        "name_normalized"
-    ]
-    .fillna("")
-    .astype(str)
-)
+total_s1_rows = sum(
+    1
+    for _ in open(
+        S1_FILE,
+        encoding="utf-8"
+    )
+) - 1
+
 
 print(
     "Source 1 rows:",
-    f"{len(s1):,}"
+    f"{total_s1_rows:,}"
 )
 
 
 # ============================================================
-# PROCESS S1 IN CHUNKS
+# REMOVE OLD OUTPUT
 # ============================================================
 
-total_output = 0
-
-for start in range(
-    0,
-    len(s1),
-    S1_CHUNK_SIZE
+if os.path.exists(
+    OUTPUT_FILE
 ):
 
-    end = min(
-        start + S1_CHUNK_SIZE,
-        len(s1)
+    os.remove(
+        OUTPUT_FILE
     )
 
-    s1_chunk = s1.iloc[
-        start:end
-    ]
 
-    print(
-        "\n========================================"
+# ============================================================
+# OUTPUT HEADER
+# ============================================================
+
+header_written = False
+
+total_pairs = 0
+processed_rows = 0
+
+
+# ============================================================
+# STREAM SOURCE 1
+# ============================================================
+
+for s1_chunk in pd.read_csv(
+    S1_FILE,
+    sep="\t",
+    dtype=str,
+    usecols=[
+        "entity_id",
+        "name_normalized",
+        "address_normalized"
+    ],
+    chunksize=S1_CHUNK_SIZE
+):
+
+    s1_chunk[
+        "name_normalized"
+    ] = (
+        s1_chunk[
+            "name_normalized"
+        ]
+        .fillna("")
+        .astype(str)
     )
 
-    print(
-        f"Processing S1 rows "
-        f"{start:,} - {end:,}"
+    s1_chunk[
+        "address_normalized"
+    ] = (
+        s1_chunk[
+            "address_normalized"
+        ]
+        .fillna("")
+        .astype(str)
     )
 
-    print(
-        "========================================"
-    )
 
-    output_rows = []
+    candidate_rows = []
 
+
+    # ========================================================
+    # GENERATE CANDIDATES
+    # ========================================================
 
     for row in s1_chunk.itertuples(
         index=False
     ):
 
         s1_id = row.entity_id
-        s1_name = row.name_normalized
 
-        prefix = get_prefix(
-            s1_name
-        )
-
-        if not prefix:
-            continue
-
-
-        # ----------------------------------------------------
-        # Retrieve only matching prefix bucket
-        # ----------------------------------------------------
-
-        candidates = candidate_index.get(
-            prefix,
-            []
+        keys = get_block_keys(
+            row.name_normalized,
+            row.address_normalized
         )
 
 
-        if not candidates:
-            continue
+        candidate_ids = set()
 
 
-        # ----------------------------------------------------
-        # Limit very large buckets
-        # ----------------------------------------------------
+        for key in keys:
 
-        if len(candidates) > MAX_BLOCK_CANDIDATES:
+            for (
+                candidate_id,
+                source
+            ) in block_index.get(
+                key,
+                []
+            ):
 
-            candidates = candidates[
-                :MAX_BLOCK_CANDIDATES
-            ]
-
-
-        # ----------------------------------------------------
-        # Extract candidate names
-        # ----------------------------------------------------
-
-        candidate_names = [
-            item[1]
-            for item in candidates
-        ]
+                candidate_ids.add(
+                    (
+                        candidate_id,
+                        source
+                    )
+                )
 
 
-        # ----------------------------------------------------
-        # Fuzzy matching inside the block
-        # ----------------------------------------------------
+        for (
+            candidate_id,
+            source
+        ) in candidate_ids:
 
-        matches = process.extract(
-            s1_name,
-            candidate_names,
-            scorer=fuzz.ratio,
-            limit=TOP_K
-        )
-
-
-        for match in matches:
-
-            matched_name = match[0]
-            score = match[1]
-            candidate_position = match[2]
-
-            candidate_id = candidates[
-                candidate_position
-            ][0]
-
-            candidate_source = candidates[
-                candidate_position
-            ][2]
-
-
-            output_rows.append(
+            candidate_rows.append(
                 {
                     "source1_entity_id": s1_id,
                     "candidate_entity_id": candidate_id,
-                    "candidate_source": candidate_source,
-                    "similarity": score / 100.0,
-                    "rank": 0
+                    "candidate_source": source
                 }
             )
 
 
     # ========================================================
-    # RANK CANDIDATES
+    # WRITE CHUNK
     # ========================================================
 
-    output_df = pd.DataFrame(
-        output_rows
-    )
+    if candidate_rows:
 
+        output_df = pd.DataFrame(
+            candidate_rows
+        ).drop_duplicates()
 
-    if not output_df.empty:
-
-        output_df = (
-            output_df
-            .sort_values(
-                [
-                    "source1_entity_id",
-                    "similarity"
-                ],
-                ascending=[
-                    True,
-                    False
-                ]
-            )
-        )
-
-        output_df[
-            "rank"
-        ] = (
-            output_df
-            .groupby(
-                "source1_entity_id"
-            )
-            .cumcount()
-            + 1
-        )
-
-
-        output_df = output_df[
-            output_df["rank"] <= TOP_K
-        ]
-
-
-        # ----------------------------------------------------
-        # Write output
-        # ----------------------------------------------------
 
         output_df.to_csv(
             OUTPUT_FILE,
             sep="\t",
             index=False,
             mode="a",
-            header=not os.path.exists(
-                OUTPUT_FILE
-            )
+            header=not header_written,
+            
         )
 
 
-        total_output += len(
+        header_written = True
+
+        total_pairs += len(
             output_df
         )
 
 
-    print(
-        f"Written candidate pairs: "
-        f"{len(output_df):,}"
+    processed_rows += len(
+        s1_chunk
     )
 
+
     print(
-        f"Total candidate pairs so far: "
-        f"{total_output:,}"
+        f"Processed S1 records: "
+        f"{processed_rows:,} / "
+        f"{total_s1_rows:,}"
+        f" | Candidate pairs: "
+        f"{total_pairs:,}"
     )
 
 
 # ============================================================
-# COMPLETE
+# FINAL RESULT
 # ============================================================
 
 print(
@@ -509,7 +460,7 @@ print(
 )
 
 print(
-    "BLOCKING COMPLETED"
+    "FULL BLOCKING COMPLETED"
 )
 
 print(
@@ -517,9 +468,16 @@ print(
 )
 
 print(
-    f"Candidate pairs: {total_output:,}"
+    "Source 1 records:",
+    f"{total_s1_rows:,}"
 )
 
 print(
-    f"Output file: {OUTPUT_FILE}"
+    "Candidate pairs:",
+    f"{total_pairs:,}"
+)
+
+print(
+    "Output file:",
+    OUTPUT_FILE
 )
